@@ -198,7 +198,7 @@ bool ImageProcessor::initialize() {
   if (!loadParameters()) return false;
   ROS_INFO("Finish loading ROS parameters...");
 
-  // Create feature detector.
+  // Create feature detector.      feature detection using the FAST method
   detector_ptr = FastFeatureDetector::create(
       processor_config.fast_threshold);
 
@@ -298,12 +298,14 @@ void ImageProcessor::imuCallback(
 
 void ImageProcessor::createImagePyramids() {
   const Mat& curr_cam0_img = cam0_curr_img_ptr->image;
+  //! constructs a pyramid which can be used as input for calcOpticalFlowPyrLK
   buildOpticalFlowPyramid(
       curr_cam0_img, curr_cam0_pyramid_,
       Size(processor_config.patch_size, processor_config.patch_size),
       processor_config.pyramid_levels, true, BORDER_REFLECT_101,
       BORDER_CONSTANT, false);
 
+  // std::vector<cv::Mat> curr_cam1_pyramid_;
   const Mat& curr_cam1_img = cam1_curr_img_ptr->image;
   buildOpticalFlowPyramid(
       curr_cam1_img, curr_cam1_pyramid_,
@@ -312,13 +314,24 @@ void ImageProcessor::createImagePyramids() {
       BORDER_CONSTANT, false);
 }
 
+/**
+ * brief: find keypoints in the stereo 
+ * 
+ * 
+ * 1. detect new features on the first image as cam0_points
+ * 2. find the corresponding cam1_points of cam0_points, and lable their corresponding inlier_markers
+ * 3. if the inlier_marker is 1, push corresponding cam0_point to cam0_inliers, push corresponding cam1_point to cam1_inlier, push 
+ *    new_feature to corresponding_inlier
+ * 4. push the feature FeatureMetaData object to corresponding pair in grid_new_features 
+ * 5. Sort the new features in each grid based on its response, assign curr_features_ptr using grid_new_features
+ */
 void ImageProcessor::initializeFirstFrame() {
   // Size of each grid.
   const Mat& img = cam0_curr_img_ptr->image;
-  static int grid_height = img.rows / processor_config.grid_row;
-  static int grid_width = img.cols / processor_config.grid_col;
+  static int grid_height = img.rows / processor_config.grid_row;// how many grids along the rows
+  static int grid_width = img.cols / processor_config.grid_col;// how many grids along the columns
 
-  // Detect new features on the frist image.
+  // Detect new features on the first image.
   vector<KeyPoint> new_features(0);
   detector_ptr->detect(img, new_features);
 
@@ -330,11 +343,14 @@ void ImageProcessor::initializeFirstFrame() {
 
   vector<cv::Point2f> cam1_points(0);
   vector<unsigned char> inlier_markers(0);
+  // find the corresponding cam1_points of cam0_points, and lable their corresponding inlier_markers
   stereoMatch(cam0_points, cam1_points, inlier_markers);
 
   vector<cv::Point2f> cam0_inliers(0);
   vector<cv::Point2f> cam1_inliers(0);
   vector<float> response_inliers(0);
+  // if the inlier_marker is 1, push corresponding cam0_point to cam0_inliers, push corresponding cam1_point to cam1_inlier, push new_feature
+  // to corresponding_inlier
   for (int i = 0; i < inlier_markers.size(); ++i) {
     if (inlier_markers[i] == 0) continue;
     cam0_inliers.push_back(cam0_points[i]);
@@ -343,6 +359,8 @@ void ImageProcessor::initializeFirstFrame() {
   }
 
   // Group the features into grids
+  // typedef std::map<int, std::vector<FeatureMetaData> > GridFeatures;
+  // push the feature to corresponding pair in grid_new_features
   GridFeatures grid_new_features;
   for (int code = 0; code <
       processor_config.grid_row*processor_config.grid_col; ++code)
@@ -364,12 +382,14 @@ void ImageProcessor::initializeFirstFrame() {
     grid_new_features[code].push_back(new_feature);
   }
 
-  // Sort the new features in each grid based on its response.
+  // Sort the new features in each grid based on its response. feature with higher response will be at the beginning of the vector
   for (auto& item : grid_new_features)
     std::sort(item.second.begin(), item.second.end(),
         &ImageProcessor::featureCompareByResponse);
 
   // Collect new features within each grid with high response.
+  // the number of features kept in each grid is the minimum of processor_config.grid_min_feature_num and new_features_this_grid.size()
+  // this step assign curr_features_ptr using grid_new_features
   for (int code = 0; code <
       processor_config.grid_row*processor_config.grid_col; ++code) {
     vector<FeatureMetaData>& features_this_grid = (*curr_features_ptr)[code];
@@ -416,6 +436,9 @@ void ImageProcessor::predictFeatureTracking(
   return;
 }
 
+/**
+ *  
+ */
 void ImageProcessor::trackFeatures() {
   // Size of each grid.
   static int grid_height =
@@ -427,6 +450,7 @@ void ImageProcessor::trackFeatures() {
   // from the previous frame to the current frame.
   Matx33f cam0_R_p_c;
   Matx33f cam1_R_p_c;
+  // integrate imu measurements among prev img and cur img to get the rotation of cam0 coordinate and cam1 coordinate
   integrateImuData(cam0_R_p_c, cam1_R_p_c);
 
   // Organize the features in the previous image.
@@ -444,7 +468,7 @@ void ImageProcessor::trackFeatures() {
     }
   }
 
-  // Number of the features before tracking.
+  // Number of the features before tracking in prev cam0 img
   before_tracking = prev_cam0_points.size();
 
   // Abort tracking if there is no features in
@@ -455,9 +479,11 @@ void ImageProcessor::trackFeatures() {
   vector<Point2f> curr_cam0_points(0);
   vector<unsigned char> track_inliers(0);
 
+  // use the rotation between two frames, cam0 intrinsics and prev_cam0_points to predict curr_cam0_points
   predictFeatureTracking(prev_cam0_points,
       cam0_R_p_c, cam0_intrinsics, curr_cam0_points);
 
+  // track features using optical flow method
   calcOpticalFlowPyrLK(
       prev_cam0_pyramid_, curr_cam0_pyramid_,
       prev_cam0_points, curr_cam0_points,
@@ -471,6 +497,7 @@ void ImageProcessor::trackFeatures() {
 
   // Mark those tracked points out of the image region
   // as untracked.
+  // if the LK optical tracked points is out of the image region, assign the corresponding track_inliers as 0
   for (int i = 0; i < curr_cam0_points.size(); ++i) {
     if (track_inliers[i] == 0) continue;
     if (curr_cam0_points[i].y < 0 ||
@@ -487,6 +514,7 @@ void ImageProcessor::trackFeatures() {
   vector<Point2f> prev_tracked_cam1_points(0);
   vector<Point2f> curr_tracked_cam0_points(0);
 
+  // put the elements in prev_ids who is marked as inliers to prev_tracked_ids
   removeUnmarkedElements(
       prev_ids, track_inliers, prev_tracked_ids);
   removeUnmarkedElements(
@@ -499,7 +527,7 @@ void ImageProcessor::trackFeatures() {
       curr_cam0_points, track_inliers, curr_tracked_cam0_points);
 
   // Number of features left after tracking.
-  after_tracking = curr_tracked_cam0_points.size();
+  after_tracking = curr_tracked_cam0_points.size();// how many features left after tracking
 
 
   // Outlier removal involves three steps, which forms a close
@@ -523,6 +551,8 @@ void ImageProcessor::trackFeatures() {
   // Step 1: stereo matching.
   vector<Point2f> curr_cam1_points(0);
   vector<unsigned char> match_inliers(0);
+  // use the extrinsic of cam0 and cam1 to get the initial cam1 points, use the LK optical flow method to track between cam0 and cam1, then 
+  // use the essential matrix to check outliers
   stereoMatch(curr_tracked_cam0_points, curr_cam1_points, match_inliers);
 
   vector<FeatureIDType> prev_matched_ids(0);
@@ -608,6 +638,16 @@ void ImageProcessor::trackFeatures() {
   return;
 }
 
+/**
+ * 1. if size of cam0_points is 0, return from this function
+ * 2. if the size of cam1_points is 0, use the rotation from cam0 to cam1 to undistort cam0_points and get cam0_points_undistorted, then
+ *    project cam0_points_undistorted and get cam1_points
+ * 3. track features among curr_cam0_pyramid_ and curr_cam1_pyramid_, use cam0_points to get cam1_points
+ * 4. chek whether the tracked points is in the region of cam1 image, if not, mark the corresponding element in inlier_markers as 0
+ * 5. compute the essential matrix between cam0 and cam1 using the skew symmetric t and R
+ * 6. undistort cam0_points and cam1_points using their own distortion coefficients, then get cam0_points_undistorted and cam1_points_undistorted
+ * 7. use the distance of point to epolar line to set corresponding element in inlier_marker
+ */
 void ImageProcessor::stereoMatch(
     const vector<cv::Point2f>& cam0_points,
     vector<cv::Point2f>& cam1_points,
@@ -615,14 +655,18 @@ void ImageProcessor::stereoMatch(
 
   if (cam0_points.size() == 0) return;
 
+  // use the rotation from cam0 to cam1 to undistort cam0_points and get cam0_points_undistorted, then project cam0_points_undistorted
+  // using the cam1 distorted coefficients 
   if(cam1_points.size() == 0) {
     // Initialize cam1_points by projecting cam0_points to cam1 using the
     // rotation from stereo extrinsics
-    const cv::Matx33d R_cam0_cam1 = R_cam1_imu.t() * R_cam0_imu;
+    const cv::Matx33d R_cam0_cam1 = R_cam1_imu.t() * R_cam0_imu;// rotation from cam0 to cam1
     vector<cv::Point2f> cam0_points_undistorted;
+    // use the R_cam0_cam1 and the new intrinsic matrix to undistort the points, the rotation used here is the rotation from cam0 to cam1
     undistortPoints(cam0_points, cam0_intrinsics, cam0_distortion_model,
                     cam0_distortion_coeffs, cam0_points_undistorted,
                     R_cam0_cam1);
+    // project the cam0_points_undistorted to cam1 image
     cam1_points = distortPoints(cam0_points_undistorted, cam1_intrinsics,
                                 cam1_distortion_model, cam1_distortion_coeffs);
   }
@@ -640,6 +684,7 @@ void ImageProcessor::stereoMatch(
 
   // Mark those tracked points out of the image region
   // as untracked.
+  // chek whether the tracked points is in the region of cam1 image, if not, mark the corresponding element in inlier_markers as 0
   for (int i = 0; i < cam1_points.size(); ++i) {
     if (inlier_markers[i] == 0) continue;
     if (cam1_points[i].y < 0 ||
@@ -651,17 +696,18 @@ void ImageProcessor::stereoMatch(
 
   // Compute the relative rotation between the cam0
   // frame and cam1 frame.
-  const cv::Matx33d R_cam0_cam1 = R_cam1_imu.t() * R_cam0_imu;
-  const cv::Vec3d t_cam0_cam1 = R_cam1_imu.t() * (t_cam0_imu-t_cam1_imu);
+  const cv::Matx33d R_cam0_cam1 = R_cam1_imu.t() * R_cam0_imu;// rotation from cam0 to cam1
+  const cv::Vec3d t_cam0_cam1 = R_cam1_imu.t() * (t_cam0_imu-t_cam1_imu);// translation from cam0 to cam1
   // Compute the essential matrix.
   const cv::Matx33d t_cam0_cam1_hat(
       0.0, -t_cam0_cam1[2], t_cam0_cam1[1],
       t_cam0_cam1[2], 0.0, -t_cam0_cam1[0],
       -t_cam0_cam1[1], t_cam0_cam1[0], 0.0);
-  const cv::Matx33d E = t_cam0_cam1_hat * R_cam0_cam1;
+  const cv::Matx33d E = t_cam0_cam1_hat * R_cam0_cam1;// compute the essential matrix using the skew symmetric t and R
 
   // Further remove outliers based on the known
   // essential matrix.
+  // undistort cam0_points and cam1_points using their own distortion coefficients, then get cam0_points_undistorted and cam1_points_undistorted
   vector<cv::Point2f> cam0_points_undistorted(0);
   vector<cv::Point2f> cam1_points_undistorted(0);
   undistortPoints(
@@ -675,6 +721,7 @@ void ImageProcessor::stereoMatch(
       cam0_intrinsics[0]+cam0_intrinsics[1]+
       cam1_intrinsics[0]+cam1_intrinsics[1]);
 
+  // use the distance of point to epolar line to set corresponding element in inlier_marker
   for (int i = 0; i < cam0_points_undistorted.size(); ++i) {
     if (inlier_markers[i] == 0) continue;
     cv::Vec3d pt0(cam0_points_undistorted[i].x,
@@ -685,6 +732,7 @@ void ImageProcessor::stereoMatch(
     double error = fabs((pt1.t() * epipolar_line)[0]) / sqrt(
         epipolar_line[0]*epipolar_line[0]+
         epipolar_line[1]*epipolar_line[1]);
+    // this is the point to line distance fabs(a*x0+b*y0+c)/sqrt(a*a+b*b)
     if (error > processor_config.stereo_threshold*norm_pixel_unit)
       inlier_markers[i] = 0;
   }
@@ -692,6 +740,9 @@ void ImageProcessor::stereoMatch(
   return;
 }
 
+/**
+ *  
+ */
 void ImageProcessor::addNewFeatures() {
   const Mat& curr_img = cam0_curr_img_ptr->image;
 
@@ -716,7 +767,7 @@ void ImageProcessor::addNewFeatures() {
       if (left_lim < 0) left_lim = 0;
       if (right_lim > curr_img.cols) right_lim = curr_img.cols;
 
-      Range row_range(up_lim, bottom_lim);
+      Range row_range(up_lim, bottom_lim);// the row_range contains [up_lim, bottom_lim), which is [y-2, y+2]
       Range col_range(left_lim, right_lim);
       mask(row_range, col_range) = 0;
     }
@@ -849,6 +900,9 @@ void ImageProcessor::pruneGridFeatures() {
   return;
 }
 
+/**
+ * use the rectification_matrix and the new intrinsic matrix to undistort the points 
+ */
 void ImageProcessor::undistortPoints(
     const vector<cv::Point2f>& pts_in,
     const cv::Vec4d& intrinsics,
@@ -856,7 +910,7 @@ void ImageProcessor::undistortPoints(
     const cv::Vec4d& distortion_coeffs,
     vector<cv::Point2f>& pts_out,
     const cv::Matx33d &rectification_matrix,
-    const cv::Vec4d &new_intrinsics) {
+    const cv::Vec4d &new_intrinsics) { // the default new_intrinsics is cv::Vec4d(1,1,0,0)
 
   if (pts_in.size() == 0) return;
 
@@ -870,6 +924,52 @@ void ImageProcessor::undistortPoints(
       0.0, new_intrinsics[1], new_intrinsics[3],
       0.0, 0.0, 1.0);
 
+  /** 
+   * 
+   * CV_EXPORTS_W void undistortPoints( InputArray src, OutputArray dst,
+                                   InputArray cameraMatrix, InputArray distCoeffs,
+                                   InputArray R = noArray(), InputArray P = noArray());
+   * @brief Computes the ideal point coordinates from the observed point coordinates.
+
+  The function is similar to cv::undistort and cv::initUndistortRectifyMap but it operates on a
+  sparse set of points instead of a raster image. Also the function performs a reverse transformation
+  to projectPoints. In case of a 3D object, it does not reconstruct its 3D coordinates, but for a
+  planar object, it does, up to a translation vector, if the proper R is specified.
+
+  For each observed point coordinate \f$(u, v)\f$ the function computes:
+  \f[
+  \begin{array}{l}
+  x^{"}  \leftarrow (u - c_x)/f_x  \\
+  y^{"}  \leftarrow (v - c_y)/f_y  \\
+  (x',y') = undistort(x^{"},y^{"}, \texttt{distCoeffs}) \\
+  {[X\,Y\,W]} ^T  \leftarrow R*[x' \, y' \, 1]^T  \\
+  x  \leftarrow X/W  \\
+  y  \leftarrow Y/W  \\
+  \text{only performed if P is specified:} \\
+  u'  \leftarrow x {f'}_x + {c'}_x  \\
+  v'  \leftarrow y {f'}_y + {c'}_y
+  \end{array}
+  \f]
+
+  where *undistort* is an approximate iterative algorithm that estimates the normalized original
+  point coordinates out of the normalized distorted point coordinates ("normalized" means that the
+  coordinates do not depend on the camera matrix).
+
+  The function can be used for both a stereo camera head or a monocular camera (when R is empty).
+
+  @param src Observed point coordinates, 1xN or Nx1 2-channel (CV_32FC2 or CV_64FC2).
+  @param dst Output ideal point coordinates after undistortion and reverse perspective
+  transformation. If matrix P is identity or omitted, dst will contain normalized point coordinates.
+  @param cameraMatrix Camera matrix \f$\vecthreethree{f_x}{0}{c_x}{0}{f_y}{c_y}{0}{0}{1}\f$ .
+  @param distCoeffs Input vector of distortion coefficients
+  \f$(k_1, k_2, p_1, p_2[, k_3[, k_4, k_5, k_6[, s_1, s_2, s_3, s_4[, \tau_x, \tau_y]]]])\f$
+  of 4, 5, 8, 12 or 14 elements. If the vector is NULL/empty, the zero distortion coefficients are assumed.
+  @param R Rectification transformation in the object space (3x3 matrix). R1 or R2 computed by
+  cv::stereoRectify can be passed here. If the matrix is empty, the identity transformation is used.
+  @param P New camera matrix (3x3) or new projection matrix (3x4) \f$\begin{bmatrix} {f'}_x & 0 & {c'}_x & t_x \\ 0 & {f'}_y & {c'}_y & t_y \\ 0 & 0 & 1 & t_z \end{bmatrix}\f$. P1 or P2 computed by
+  cv::stereoRectify can be passed here. If the matrix is empty, the identity new camera matrix is used.
+  */
+  // use the rectification_matrix and the new intrinsic matrix to undistort the points
   if (distortion_model == "radtan") {
     cv::undistortPoints(pts_in, pts_out, K, distortion_coeffs,
                         rectification_matrix, K_new);
@@ -886,6 +986,9 @@ void ImageProcessor::undistortPoints(
   return;
 }
 
+/**
+ * project the points using the intrinsics and distortion model
+ */
 vector<cv::Point2f> ImageProcessor::distortPoints(
     const vector<cv::Point2f>& pts_in,
     const cv::Vec4d& intrinsics,
@@ -916,6 +1019,12 @@ vector<cv::Point2f> ImageProcessor::distortPoints(
   return pts_out;
 }
 
+/**
+ * 1. find the range of [begin_iter, end_iter] which is between prev img and cur img
+ * 2. compute the average angular velocity among the begin_iter and end_iter as the mean_ang_vel
+ * 3. use the rotation matrix from imu to cam0 and imu to cam1 independently to compute the mean_ang_vel in cam0 and cam1 coordinate
+ * 4. use the mean_velocity*delta_time as the rotation of cam0 and cam1
+ */
 void ImageProcessor::integrateImuData(
     Matx33f& cam0_R_p_c, Matx33f& cam1_R_p_c) {
   // Find the start and the end limit within the imu msg buffer.
@@ -926,7 +1035,7 @@ void ImageProcessor::integrateImuData(
       ++begin_iter;
     else
       break;
-  }
+  }// while the imu msg begin iterator is in front of the prev img time, add the begin_iter with 1
 
   auto end_iter = begin_iter;
   while (end_iter != imu_msg_buffer.end()) {
@@ -935,10 +1044,11 @@ void ImageProcessor::integrateImuData(
       ++end_iter;
     else
       break;
-  }
+  }// while the imu msg begin iterator is behind the cur img time, add the end iter with 1
 
   // Compute the mean angular velocity in the IMU frame.
   Vec3f mean_ang_vel(0.0, 0.0, 0.0);
+  // compute the average among the begin_iter and end_iter as the mean_ang_vel
   for (auto iter = begin_iter; iter < end_iter; ++iter)
     mean_ang_vel += Vec3f(iter->angular_velocity.x,
         iter->angular_velocity.y, iter->angular_velocity.z);
@@ -948,13 +1058,14 @@ void ImageProcessor::integrateImuData(
 
   // Transform the mean angular velocity from the IMU
   // frame to the cam0 and cam1 frames.
+  // use the rotation matrix from imu to cam0 and imu to cam1 independently to compute the mean_ang_vel in cam0 and cam1 coordinate
   Vec3f cam0_mean_ang_vel = R_cam0_imu.t() * mean_ang_vel;
   Vec3f cam1_mean_ang_vel = R_cam1_imu.t() * mean_ang_vel;
 
   // Compute the relative rotation.
   double dtime = (cam0_curr_img_ptr->header.stamp-
       cam0_prev_img_ptr->header.stamp).toSec();
-  Rodrigues(cam0_mean_ang_vel*dtime, cam0_R_p_c);
+  Rodrigues(cam0_mean_ang_vel*dtime, cam0_R_p_c);// use the mean_velocity*delta_time as the rotation of cam0 and cam1
   Rodrigues(cam1_mean_ang_vel*dtime, cam1_R_p_c);
   cam0_R_p_c = cam0_R_p_c.t();
   cam1_R_p_c = cam1_R_p_c.t();
@@ -986,6 +1097,9 @@ void ImageProcessor::rescalePoints(
   return;
 }
 
+/**
+ * 
+ */
 void ImageProcessor::twoPointRansac(
     const vector<Point2f>& pts1, const vector<Point2f>& pts2,
     const cv::Matx33f& R_p_c, const cv::Vec4d& intrinsics,
@@ -1001,6 +1115,19 @@ void ImageProcessor::twoPointRansac(
         pts1.size(), pts2.size());
 
   double norm_pixel_unit = 2.0 / (intrinsics[0]+intrinsics[1]);
+  /**
+   * how to get the iter_num of the ransac
+   * assume we need num_fit samples to get the solution, and the possibility of get an inlier is p
+   * the possibility of get num_fit inliers in a single iteration step is : pow(p, num_fit)
+   * the possibility of can not get num_fit inliers in a single iteration step is : 1-pow(p, num_fit)
+   * the possibility of can not get num_fit inliers in a any single iteration step among num_iter iterations is : pow(1-pow(p, num_fit), num_iter)
+   * the possibility of at least get num_fit inliers in a single iteration step among num_iter iterations is : 1-pow(1-pow(p, num_fit), num_iter)
+   * let    1-pow(1-pow(p, num_fit), num_iter)>success_probability
+   * 1-success_probability > pow(1-pow(p, num_fit), num_iter)
+   * log(1-success_probability) > num_iter*log(1-pow(p, num_fit))
+   * because log(1-pow(p, num_fit))<0
+   * num_iter > log(1-success_probability)/log(1-pow(p, num_fit))
+   */
   int iter_num = static_cast<int>(
       ceil(log(1-success_probability) / log(1-0.7*0.7)));
 
@@ -1020,6 +1147,7 @@ void ImageProcessor::twoPointRansac(
 
   // Compenstate the points in the previous image with
   // the relative rotation.
+  // transform pts1_undistorted using the rotation from previous to current
   for (auto& pt : pts1_undistorted) {
     Vec3f pt_h(pt.x, pt.y, 1.0f);
     //Vec3f pt_hc = dR * pt_h;
@@ -1030,6 +1158,7 @@ void ImageProcessor::twoPointRansac(
 
   // Normalize the points to gain numerical stability.
   float scaling_factor = 0.0f;
+  // compute a scale factor from pts1_undistorted and pts2_undistorted, then normalize the two vectors using the scale factor
   rescalePoints(pts1_undistorted, pts2_undistorted, scaling_factor);
   norm_pixel_unit *= scaling_factor;
 
@@ -1037,7 +1166,7 @@ void ImageProcessor::twoPointRansac(
   // which will be used frequently later.
   vector<Point2d> pts_diff(pts1_undistorted.size());
   for (int i = 0; i < pts1_undistorted.size(); ++i)
-    pts_diff[i] = pts1_undistorted[i] - pts2_undistorted[i];
+    pts_diff[i] = pts1_undistorted[i] - pts2_undistorted[i];// compute the difference between the rotated pts1_undistorted and the pts2_undistorted
 
   // Mark the point pairs with large difference directly.
   // BTW, the mean distance of the rest of the point pairs
@@ -1045,10 +1174,12 @@ void ImageProcessor::twoPointRansac(
   double mean_pt_distance = 0.0;
   int raw_inlier_cntr = 0;
   for (int i = 0; i < pts_diff.size(); ++i) {
+    // compute the distance of the rotated pts1_undistorted and the pts2_undistorted
     double distance = sqrt(pts_diff[i].dot(pts_diff[i]));
     // 25 pixel distance is a pretty large tolerance for normal motion.
     // However, to be used with aggressive motion, this tolerance should
     // be increased significantly to match the usage.
+    // if the distance is too big, assign the corresponding inlier_markers using 0, else compute the average of the distance
     if (distance > 50.0*norm_pixel_unit) {
       inlier_markers[i] = 0;
     } else {
@@ -1061,6 +1192,7 @@ void ImageProcessor::twoPointRansac(
   // If the current number of inliers is less than 3, just mark
   // all input as outliers. This case can happen with fast
   // rotation where very few features are tracked.
+  // if the number of inliers is less than 3, mark all inliers as outlier and return from this function
   if (raw_inlier_cntr < 3) {
     for (auto& marker : inlier_markers) marker = 0;
     return;
@@ -1072,12 +1204,14 @@ void ImageProcessor::twoPointRansac(
   // work. If so, the distance between the matched points will
   // be almost 0.
   //if (mean_pt_distance < inlier_error*norm_pixel_unit) {
+  // if the average distance is less than norm_pixel_unit, for elements in pts_diff, if the distance is bigger than a threshold, mark 
+  // the pts as outlier
   if (mean_pt_distance < norm_pixel_unit) {
     //ROS_WARN_THROTTLE(1.0, "Degenerated motion...");
     for (int i = 0; i < pts_diff.size(); ++i) {
       if (inlier_markers[i] == 0) continue;
       if (sqrt(pts_diff[i].dot(pts_diff[i])) >
-          inlier_error*norm_pixel_unit)
+          inlier_error*norm_pixel_unit)// inlier_error is the input of this function
         inlier_markers[i] = 0;
     }
     return;
@@ -1085,6 +1219,18 @@ void ImageProcessor::twoPointRansac(
 
   // In the case of general motion, the RANSAC model can be applied.
   // The three column corresponds to tx, ty, and tz respectively.
+  // the coeff_t has pts_diff.size() rows and 3 columns
+  /**
+   * according to the definition of essential matrix
+   * x2.transpose()*t.skew_symmetric()*R*x1=0     x2.transpose()*t.skew_symmetric()*x1'=0
+   * here, x1' is the rotated points as before the rescalePoints step
+   *               |  0   -tz   ty |   | x1 |
+   * [ x2 y2 1 ] * | tz    0   -tx | * | y1 | = 0
+   *               | -ty   tx   0  |   | 1  |
+   * we can get    (y1-y2)*tx-(x1-x2)*ty+(x1*y2-y1*x2)*tz=0
+   * 
+   */
+  // the matrix coeff_t has the same size with pts1_undistorted and pts2_undistorted
   MatrixXd coeff_t(pts_diff.size(), 3);
   for (int i = 0; i < pts_diff.size(); ++i) {
     coeff_t(i, 0) = pts_diff[i].y;
@@ -1107,6 +1253,7 @@ void ImageProcessor::twoPointRansac(
     // Randomly select two point pairs.
     // Although this is a weird way of selecting two pairs, but it
     // is able to efficiently avoid selecting repetitive pairs.
+    // use the random number generator to select two pairs of points, in this way, the two pairs won't repetitive to each other
     int select_idx1 = random_gen.uniformInteger(
         0, raw_inlier_idx.size()-1);
     int select_idx_diff = random_gen.uniformInteger(
@@ -1118,6 +1265,29 @@ void ImageProcessor::twoPointRansac(
     int pair_idx1 = raw_inlier_idx[select_idx1];
     int pair_idx2 = raw_inlier_idx[select_idx2];
 
+    /**
+     * as we are using the two point ransac method, we will use two pairs of points to conduct the computation
+     *                                    | tx |
+     * | y1-y2  -(x1-x2)  x1*y2-x2*y1 | * | ty | = 0         (1)
+     * | y3-y4  -(x3-x4)  x3*y4-x4*y3 |   | tz | 
+     * which can be written as
+     *                                    | tx |
+     * | coeff_tx  coeff_ty  coeff_tz | * | ty | = 0         (2)
+     *                                    | tz |
+     * here coeff_tx, coeff_ty and coeff_tz are all 2*1 vectors
+     * from (2), we can get 
+     * | coeff_tx  coeff_ty | * | tx | = -coeff_tz*tz        (3)
+     *                          | ty |
+     * and 
+     * | coeff_ty  coeff_tz | * | ty | = -coeff_tx*tx        (4)
+     *                          | tz |
+     * and
+     * | coeff_tx  coeff_tz | * | tx | = -coeff_ty*ty        (5)
+     *                          | tz |
+     * if coeff_tz has the minimal norm compared to coeff_tx and coeff_ty, use (3) to conduct the computation
+     * if coeff_tx has the minimal norm compared to coeff_ty and coeff_tz, use (4) to conduct the computation
+     * if coeff_ty has the minimal norm compared to coeff_tx and coeff_tz, use (5) to conduct the computation
+     */
     // Construct the model;
     Vector2d coeff_tx(coeff_t(pair_idx1, 0), coeff_t(pair_idx2, 0));
     Vector2d coeff_ty(coeff_t(pair_idx1, 1), coeff_t(pair_idx2, 1));
@@ -1133,6 +1303,7 @@ void ImageProcessor::twoPointRansac(
     if (base_indicator == 0) {
       Matrix2d A;
       A << coeff_ty, coeff_tz;
+      // in this branch, coeff_tx is the smallest among the three, let tx = 1, we can get [ty tz].transpose() as the 2*1 vector solution
       Vector2d solution = A.inverse() * (-coeff_tx);
       model(0) = 1.0;
       model(1) = solution(0);
@@ -1140,6 +1311,7 @@ void ImageProcessor::twoPointRansac(
     } else if (base_indicator ==1) {
       Matrix2d A;
       A << coeff_tx, coeff_tz;
+      // in this branch, coeff_ty is the smallest among the three, let ty = 1, we can get [tx tz].transpose() as the 2*1 vector solution
       Vector2d solution = A.inverse() * (-coeff_ty);
       model(0) = solution(0);
       model(1) = 1.0;
@@ -1147,16 +1319,35 @@ void ImageProcessor::twoPointRansac(
     } else {
       Matrix2d A;
       A << coeff_tx, coeff_ty;
+      // in this branch, coeff_tz is the smallest among the three, let tz = 1, we can get [tx ty].transpose() as the 2*1 vector solution
       Vector2d solution = A.inverse() * (-coeff_tz);
       model(0) = solution(0);
       model(1) = solution(1);
       model(2) = 1.0;
     }
+    // vector model stores the translation part between previous and current frame
 
     // Find all the inliers among point pairs.
+    /**
+     * according to the definition of essential matrix
+     * x2.transpose()*t.skew_symmetric()*R*x1=0     x2.transpose()*t.skew_symmetric()*x1'=0
+     * here, x1' is the rotated points as before the rescalePoints step
+     *               |  0   -tz   ty |   | x1 |
+     * [ x2 y2 1 ] * | tz    0   -tx | * | y1 | = 0
+     *               | -ty   tx   0  |   | 1  |
+     * we can get    (y1-y2)*tx-(x1-x2)*ty+(x1*y2-y1*x2)*tz=0
+     * denote 
+     * coeff_tx = y1-y2
+     * coeff_ty = -(x1-x2)
+     * coeff_tz = x1*y2-y1*x2
+     * we can get [ coeff_tx  coeff_ty  coeff_tz ]*[ tx  ty  tz ].transpose() = 0
+     */
+    // the matrix coeff_t has pts1_undistorted.size() rows and 3 columns
     VectorXd error = coeff_t * model;
 
     vector<int> inlier_set;
+    // for all points in this problem, if it is already marked as an outlier, continue to process next point, if the error is 
+    // less than the threshold, push the index to inlier_set
     for (int i = 0; i < error.rows(); ++i) {
       if (inlier_markers[i] == 0) continue;
       if (std::abs(error(i)) < inlier_error*norm_pixel_unit)
@@ -1165,10 +1356,12 @@ void ImageProcessor::twoPointRansac(
 
     // If the number of inliers is small, the current
     // model is probably wrong.
+    // if the number of inliers is smaller than 20% of the whole set, continue to conduct next iteration of the ransac
     if (inlier_set.size() < 0.2*pts1_undistorted.size())
       continue;
 
     // Refit the model using all of the possible inliers.
+    // if the inlier number is acceptable, use the inlier_set to construct coeff_tx_better, coeff_ty_better and coeff_tz_better
     VectorXd coeff_tx_better(inlier_set.size());
     VectorXd coeff_ty_better(inlier_set.size());
     VectorXd coeff_tz_better(inlier_set.size());
@@ -1180,6 +1373,13 @@ void ImageProcessor::twoPointRansac(
 
     Vector3d model_better(0.0, 0.0, 0.0);
     if (base_indicator == 0) {
+      /**
+       * A*[ty tz].transpose() = -coeff_tx_better*tx, let tx=1, which is A*solution=-coeff_tx_better
+       * heres inlier_set.size() equations but only 2 variables, the number of equations is more than the number of variables
+       * A.transpose()*A*solution=-A.transpose()*coeff_tx_better
+       * solution = -(A.transpose()*A).inverse()*A.transpose()*coeff_tx_better
+       * this is the least square method
+       */ 
       MatrixXd A(inlier_set.size(), 2);
       A << coeff_ty_better, coeff_tz_better;
       Vector2d solution =
@@ -1205,7 +1405,10 @@ void ImageProcessor::twoPointRansac(
       model_better(2) = 1.0;
     }
 
-    // Compute the error and upate the best model if possible.
+    // Compute the error and update the best model if possible.
+    /**
+     * here use the coeff_t not coeff_tx_better to compute the new error means the error is the eroor of whole set not just the inliers
+     */
     VectorXd new_error = coeff_t * model_better;
 
     double this_error = 0.0;
@@ -1352,6 +1555,9 @@ void ImageProcessor::drawFeaturesMono() {
   waitKey(5);
 }
 
+/**
+ * concat the cam0 and cam1 image, draw grids on image and independently draw tracked and new features on the image 
+ */
 void ImageProcessor::drawFeaturesStereo() {
 
   if(debug_stereo_pub.getNumSubscribers() > 0)
@@ -1365,7 +1571,7 @@ void ImageProcessor::drawFeaturesStereo() {
     static int grid_width =
       cam0_curr_img_ptr->image.cols / processor_config.grid_col;
 
-    // Create an output image.
+    // Create an output image. output image is the concat of cam0 and cam1
     int img_height = cam0_curr_img_ptr->image.rows;
     int img_width = cam0_curr_img_ptr->image.cols;
     Mat out_img(img_height, img_width*2, CV_8UC3);
@@ -1375,17 +1581,17 @@ void ImageProcessor::drawFeaturesStereo() {
              out_img.colRange(img_width, img_width*2), CV_GRAY2RGB);
 
     // Draw grids on the image.
-    for (int i = 1; i < processor_config.grid_row; ++i) {
+    for (int i = 1; i < processor_config.grid_row; ++i) { // draw lines along the horizon direction
       Point pt1(0, i*grid_height);
       Point pt2(img_width*2, i*grid_height);
       line(out_img, pt1, pt2, Scalar(255, 0, 0));
     }
-    for (int i = 1; i < processor_config.grid_col; ++i) {
+    for (int i = 1; i < processor_config.grid_col; ++i) { // draw lines along the vertical direction on cam0 image
       Point pt1(i*grid_width, 0);
       Point pt2(i*grid_width, img_height);
       line(out_img, pt1, pt2, Scalar(255, 0, 0));
     }
-    for (int i = 1; i < processor_config.grid_col; ++i) {
+    for (int i = 1; i < processor_config.grid_col; ++i) { // draw lines along the vertical direction on cam1 image
       Point pt1(i*grid_width+img_width, 0);
       Point pt2(i*grid_width+img_width, img_height);
       line(out_img, pt1, pt2, Scalar(255, 0, 0));
@@ -1426,7 +1632,7 @@ void ImageProcessor::drawFeaturesStereo() {
 
         circle(out_img, curr_pt0, 3, tracked, -1);
         circle(out_img, curr_pt1, 3, tracked, -1);
-        line(out_img, prev_pt0, curr_pt0, tracked, 1);
+        line(out_img, prev_pt0, curr_pt0, tracked, 1); // Scalar tracked(0, 255, 0);
         line(out_img, prev_pt1, curr_pt1, tracked, 1);
 
         prev_cam0_points.erase(id);
