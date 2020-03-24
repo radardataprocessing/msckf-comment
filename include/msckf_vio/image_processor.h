@@ -89,7 +89,7 @@ private:
    *    grid index.
    * int here in the pair means the grid index
    */
-  typedef std::map<int, std::vector<FeatureMetaData> > GridFeatures;
+  typedef std::map<int, std::vector<FeatureMetaData> > GridFeatures; // key : grid index   value : features
 
   /*
    * @brief keyPointCompareByResponse
@@ -236,7 +236,7 @@ private:
    */
   void predictFeatureTracking(
       const std::vector<cv::Point2f>& input_pts,
-      const cv::Matx33f& R_p_c,
+      const cv::Matx33f& R_p_c, // rotation matrix from previous to current 
       const cv::Vec4d& intrinsics,
       std::vector<cv::Point2f>& compenstated_pts);
 
@@ -255,15 +255,15 @@ private:
    * @return inlier_flag: 1 for inliers and 0 for outliers.
    */
   void twoPointRansac(
-      const std::vector<cv::Point2f>& pts1,
-      const std::vector<cv::Point2f>& pts2,
-      const cv::Matx33f& R_p_c,
-      const cv::Vec4d& intrinsics,
-      const std::string& distortion_model,
-      const cv::Vec4d& distortion_coeffs,
-      const double& inlier_error,
-      const double& success_probability,
-      std::vector<int>& inlier_markers);
+      const std::vector<cv::Point2f>& pts1, // first set of points
+      const std::vector<cv::Point2f>& pts2, // second set of points
+      const cv::Matx33f& R_p_c,             // rotation from previous to current
+      const cv::Vec4d& intrinsics,          //
+      const std::string& distortion_model,  // 
+      const cv::Vec4d& distortion_coeffs,   // 
+      const double& inlier_error,           // acceptable error to be considered as an inlier
+      const double& success_probability,    // the required probability of success
+      std::vector<int>& inlier_markers);    // 1 for inliers and 0 for outliers
   void undistortPoints(
       const std::vector<cv::Point2f>& pts_in,
       const cv::Vec4d& intrinsics,
@@ -307,10 +307,10 @@ private:
    */
   template <typename T>
   void removeUnmarkedElements(
-      const std::vector<T>& raw_vec,
-      const std::vector<unsigned char>& markers,
-      std::vector<T>& refined_vec) {
-    if (raw_vec.size() != markers.size()) {
+      const std::vector<T>& raw_vec,              // vector with outliers
+      const std::vector<unsigned char>& markers,  // 0 will represent a outlier, 1 will be an inlier.
+      std::vector<T>& refined_vec) {              // vector without outliers
+    if (raw_vec.size() != markers.size()) { // the raw_vec must have the same size with markers
       ROS_WARN("The input size of raw_vec(%lu) and markers(%lu) does not match...",
           raw_vec.size(), markers.size());
     }
@@ -364,6 +364,7 @@ private:
   std::vector<cv::Mat> curr_cam1_pyramid_;
 
   // Features in the previous and current image.
+  // GridFeature is a std::map whose key is grid index and value is FeatureMetaData
   boost::shared_ptr<GridFeatures> prev_features_ptr;
   boost::shared_ptr<GridFeatures> curr_features_ptr;
 

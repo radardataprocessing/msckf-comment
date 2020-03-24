@@ -67,13 +67,18 @@ class MsckfVio {
      *    camera states for constructing measurement
      *    model.
      */
+    /**
+     * typedef std::map<StateIDType, CAMState, std::less<int>,
+     *  Eigen::aligned_allocator<
+     *  std::pair<const StateIDType, CAMState> > > CamStateServer; 
+     */
     struct StateServer {
       IMUState imu_state;
       CamStateServer cam_states;
 
       // State covariance matrix
       Eigen::MatrixXd state_cov;
-      Eigen::Matrix<double, 12, 12> continuous_noise_cov;
+      Eigen::Matrix<double, 12, 12> continuous_noise_cov;// I think 12 here means [gyro_noise, gyro_bias_noise, acc_noise, acc_bias_noise]
     };
 
 
@@ -142,6 +147,7 @@ class MsckfVio {
     void addFeatureObservations(const CameraMeasurementConstPtr& msg);
     // This function is used to compute the measurement Jacobian
     // for a single feature observed at a single camera frame.
+    // I think 4 here represents u0, v0, u1, v1
     void measurementJacobian(const StateIDType& cam_state_id,
         const FeatureIDType& feature_id,
         Eigen::Matrix<double, 4, 6>& H_x,
@@ -167,6 +173,19 @@ class MsckfVio {
     static std::map<int, double> chi_squared_test_table;
 
     // State vector
+    /**
+     *  * @brief StateServer Store one IMU states and several
+     *    camera states for constructing measurement
+     *    model.
+     *
+     *   struct StateServer {
+     *       IMUState imu_state;
+     *       CamStateServer cam_states;
+     *       // State covariance matrix
+     *       Eigen::MatrixXd state_cov;
+     *       Eigen::Matrix<double, 12, 12> continuous_noise_cov;// I think 12 here means [gyro_noise, gyro_bias_noise, acc_noise, acc_bias_noise]
+     *   };
+     */
     StateServer state_server;
     // Maximum number of camera states
     int max_cam_state_size;

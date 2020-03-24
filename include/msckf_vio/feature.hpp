@@ -77,7 +77,7 @@ struct Feature {
 
   /*
    * @brief jacobian Compute the Jacobian of the camera observation
-   * @param T_c0_c1 A rigid body transformation takes
+   * @param T_c0_ci A rigid body transformation takes
    *    a vector in c0 frame to ci frame.
    * @param x The current estimation.
    * @param z The actual measurement of the feature in ci frame.
@@ -85,7 +85,7 @@ struct Feature {
    * @return r The computed residual.
    * @return w Weight induced by huber kernel.
    */
-  inline void jacobian(const Eigen::Isometry3d& T_c0_ci,
+  inline void jacobian(const Eigen::Isometry3d& T_c0_ci, // T_c0_ci means from c0 to ci
       const Eigen::Vector3d& x, const Eigen::Vector2d& z,
       Eigen::Matrix<double, 2, 3>& J, Eigen::Vector2d& r,
       double& w) const;
@@ -101,8 +101,8 @@ struct Feature {
    */
   // triangulate
   inline void generateInitialGuess(
-      const Eigen::Isometry3d& T_c1_c2, const Eigen::Vector2d& z1,
-      const Eigen::Vector2d& z2, Eigen::Vector3d& p) const;
+      const Eigen::Isometry3d& T_c1_c2, const Eigen::Vector2d& z1,  // T_c1_c2 means from c2 frame to c1 frame
+      const Eigen::Vector2d& z2, Eigen::Vector3d& p) const; // p is the feature position in c1 frame
 
   /*
    * @brief checkMotion Check the input camera poses to ensure
@@ -126,6 +126,11 @@ struct Feature {
    * @return True if the estimated 3d position of the feature
    *    is valid.
    */
+  /**
+   * typedef std::map<StateIDType, CAMState, std::less<int>,
+   *    Eigen::aligned_allocator<
+   *    std::pair<const StateIDType, CAMState> > > CamStateServer; 
+   */
   inline bool initializePosition(
       const CamStateServer& cam_states);
 
@@ -141,6 +146,7 @@ struct Feature {
 
   // Store the observations of the features in the
   // state_id(key)-image_coordinates(value) manner.
+  // Eigen::Vector4d here stores u0, v0, u1, v1, StateIDType stores the camera index
   std::map<StateIDType, Eigen::Vector4d, std::less<StateIDType>,
     Eigen::aligned_allocator<
       std::pair<const StateIDType, Eigen::Vector4d> > > observations;
@@ -188,6 +194,13 @@ typedef std::map<FeatureIDType, Feature, std::less<int>,
  * beta_j = Yj_Cn/Zj_Cn
  * rho_j = 1/Zj_Cn
  * 
+ * Xj_Ci = Zj_Cn * hi1(alpha_j, beta_j, rho_j)
+ * Yj_Ci = Zj_Cn * hi2(alpha_j, beta_j, rho_j)
+ * Zj_Ci = Zj_Cn * hi3(alpha_j, beta_j, rho_j)
+ * 
+ * Xj_Ci/Zj_Ci = hi1(alpha_j, beta_j, rho_j)/hi3(alpha_j, beta_j, rho_j)
+ * Yj_Ci/Zj_Ci = hi2(alpha_j, beta_j, rho_j)/hi3(alpha_j, beta_j, rho_j)
+ * 
  * if j means the feature id, i means the camera id
  *                | Xj_Ci |
  * zj_i = 1/Zj_Ci*| Yj_Ci | + nj_i
@@ -203,6 +216,7 @@ void Feature::cost(const Eigen::Isometry3d& T_c0_ci,
   const double& beta = x(1);
   const double& rho = x(2);
 
+  // transform the feature 3d coordinate from 0th camera frame to ith camera frame
   Eigen::Vector3d h = T_c0_ci.linear()*
     Eigen::Vector3d(alpha, beta, 1.0) + rho*T_c0_ci.translation();
   double& h1 = h(0);
@@ -218,8 +232,8 @@ void Feature::cost(const Eigen::Isometry3d& T_c0_ci,
 }
 
 /**
- * (h1/h3)' = (h1'*h3 - h1*h3')/(h3*h3) 
- * (h2/h3)' = (h2'*h3 - h2*h3')/(h3*h3) 
+ * (h1/h3)' = (h1'*h3 - h1*h3')/(h3*h3) = h1'/h3 - h1*h3'/(h3*h3) 
+ * (h2/h3)' = (h2'*h3 - h2*h3')/(h3*h3) = h2'/h3 - h2*h3'/(h3*h3)
  * h1 = R11*alpha + R12*beta + R13 + rho*T11
  * h2 = R21*alpha + R22*beta + R23 + rho*T21
  * h3 = R31*alpha + R32*beta + R33 + rho*T31
@@ -244,13 +258,15 @@ void Feature::jacobian(const Eigen::Isometry3d& T_c0_ci,
   double& h2 = h(1);
   double& h3 = h(2);
 
-  // Isometry3d is a 4x4 matrix, means the euclidean transformation
+  // Isometry3d is a 4x4 matrix, represents the euclidean transformation
   // Compute the Jacobian.
   Eigen::Matrix3d W;
   W.leftCols<2>() = T_c0_ci.linear().leftCols<2>(); // leftCols<q> means the first q columns
   W.rightCols<1>() = T_c0_ci.translation();
 
-  J.row(0) = 1/h3*W.row(0) - h1/(h3*h3)*W.row(2);
+  // the two rows in the jacobian matrix represents residual(0) and residual(1)
+  // thw three columns in the jacobian matrix represents alpha, beta and rho
+  J.row(0) = 1/h3*W.row(0) - h1/(h3*h3)*W.row(2); 
   J.row(1) = 1/h3*W.row(1) - h2/(h3*h3)*W.row(2);
 
   // Compute the residual.
@@ -325,7 +341,7 @@ void Feature::generateInitialGuess(
 }
 
 /**
- *  
+ * use the first and last camera in the map cam_states who observed the feature to check whether the parallax is sufficient
  */
 bool Feature::checkMotion(
     const CamStateServer& cam_states) const {
@@ -365,8 +381,15 @@ bool Feature::checkMotion(
   // and the last frame. We assume the first frame and
   // the last frame will provide the largest motion to
   // speed up the checking process.
+  // feature_direction is a unit vector
   Eigen::Vector3d translation = last_cam_pose.translation() -
     first_cam_pose.translation();
+  /**
+   * parallel_translation = translation.transpose()*feature_direction
+   *                      = |translation|*|feature_direction|*cos<translation,feature_direction>
+   * because feature_direction is a unit vector, parallel_translation is the length of translation's projection along the feature_direction axis
+   * parallel_translation*feature_direction is the translation's projection along the feature_direction axis
+   */
   double parallel_translation =
     translation.transpose()*feature_direction;// get the part of the translation which is parallel to the feature direction
   Eigen::Vector3d orthogonal_translation = translation -
@@ -379,9 +402,28 @@ bool Feature::checkMotion(
   else return false;
 }
 
-
 /**
- *  
+ * observations is a map whose keys are frame indexes and values are u0, v0, u1, v1 of the frame
+ * cam_states is a map whose keys are frame indexes and values are frame states including pose, time .etc
+ * 1. for all frames observing this feature, get its frame state, if can't get its frame state, continue to process next frame, add
+ *    the left and right camera's measurement(u,v) and pose to measurements and cam_poses
+ * 2. use the 0th and last frame in cam_poses to compute the position of feature in the 0th frame
+ * 3. for all the elements in cam_poses and measurements(including the left and right camera in each frame), compute the total cost  
+ * 4. while optimization steps is smaller than optimization_config.outer_loop_max_iteration and the delta value is bigger than
+ *    optimization_config.estimation_precision
+ *    4.1 for each pose in cam_poses, compute the jacobian of the reprojection error about the position in the 0th frame, then
+ *        A += w_square * J.transpose() * J, b += w_square * J.transpose() * r, it also take weights into consideration and
+ *        I think it's like the gaussian-newton optimization method. While inner_loop_cntr++ <
+ *        optimization_config.inner_loop_max_iteration and is_cost_reduced is false, solve (A+damper)* delta = b (damper is weighted 
+ *        by lambda), I think it's like the LM optimization method, use the new solution to check whether the cost is reduced
+ * 5. use the solution of the 4th step as the position in 0th frame
+ * 6. use each pose in cam_poses to transform the position of feature to each frame, if the depth in any frame is negative, set
+ *    is_valid_solution to false
+ * 7. transform the position to the world coordinate, if is_valid_solution is true, set is_initialized to true and return is_initialized
+ */
+/**
+ * use the first and last frame observing this feature to triangulate the position in the 0th frame, then use all the frames to optimize
+ * the position in the 0th frame, check whether the depth in each frame is positive to determine whether the feature is successfully initialized
  */
 bool Feature::initializePosition(
     const CamStateServer& cam_states) {
@@ -390,6 +432,7 @@ bool Feature::initializePosition(
     Eigen::aligned_allocator<Eigen::Isometry3d> > cam_poses(0);
   std::vector<Eigen::Vector2d,
     Eigen::aligned_allocator<Eigen::Vector2d> > measurements(0);
+
 
   for (auto& m : observations) {
     // TODO: This should be handled properly. Normally, the
@@ -463,6 +506,8 @@ bool Feature::initializePosition(
 
       // compute the jacobian of (h1/h3) and (h2/h3) about alpha, beta and rho.
       // h1, h2, h3 is defined in equation(37), alpha is (X/Z), beta is (Y/Z), rho is (1/Z)
+      // the jacobian is the gradient of cost about the position of the feature in 0th frame 
+      // I think r here is the cost instead of the residual
       jacobian(cam_poses[i], solution, measurements[i], J, r, w);
 
       if (w == 1) {

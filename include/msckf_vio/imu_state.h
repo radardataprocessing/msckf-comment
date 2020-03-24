@@ -61,6 +61,12 @@ struct IMUState {
   // `velocity`. There three variables are used to modify
   // the transition matrices to make the observability matrix
   // have proper null space.
+  /**
+   * orientation_null and position_null are used to modify the transition matrics to make the 
+   * observability matrix have proper null space, for more details please refer to "Consistency Analysis 
+   * and Improvement of Vision-aided Inertial Navigation", the modified transition matrics is defined 
+   * as equation (74) in that paper
+  */
   Eigen::Vector4d orientation_null;
   Eigen::Vector3d position_null;
   Eigen::Vector3d velocity_null;
